@@ -46,6 +46,19 @@ npm run dev      # Starts Next.js dev server
 - `scripts/install.sh` - Installs all dependencies
 - `scripts/run.sh` - Starts all services (including frontend)
 
+### Command Parser (AI / Gemini, free)
+
+The command-parser service turns speech into whiteboard commands using **Google Gemini** (no local model, API only). Free API key: [Google AI Studio](https://aistudio.google.com/apikey).
+
+```sh
+cd services/command-parser
+pip install -r requirements.txt
+export GOOGLE_API_KEY="your-key"
+uvicorn app:app --reload --port 5000
+```
+
+See `services/command-parser/README.md` for details.
+
 ### Notes
 - No TypeScript: All frontend code is plain JavaScript.
 - Artifacts and dependencies are gitignored (`frontend/node_modules`, `frontend/.next`, etc).

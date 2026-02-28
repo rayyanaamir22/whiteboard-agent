@@ -1,1 +1,6 @@
-# requirements.txt for command-parser 
+# command-parser: FastAPI + LangChain + Gemini (free tier, no local model)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+langchain-google-genai>=2.0.0,<3.0.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0

@@ -213,12 +213,7 @@ function getMockCommand(transcript, shapes = []) {
   return null;
 }
 
-// Initial shapes: one rectangle, one circle, one text (VocalCanvas-style)
-const INITIAL_SHAPES = [
-  { id: 'rect-1', type: 'rectangle', x: 150, y: 100, width: 100, height: 100, fill: '#e57373', stroke: '#c62828' },
-  { id: 'circle-1', type: 'circle', x: 400, y: 350, radius: 50, fill: '#64b5f6', stroke: '#1976d2' },
-  { id: 'text-1', type: 'text', x: 280, y: 250, text: 'Hello', fontSize: 24, fill: 'black' },
-];
+const INITIAL_SHAPES = [];
 
 // VocalCanvas theme
 const COLORS = {
@@ -244,12 +239,22 @@ const MicIcon = ({ size = 24, color = 'currentColor', style = {} }) => (
   </svg>
 );
 
+const InfoIcon = ({ size = 20, color = 'currentColor', style = {} }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', ...style }}>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="16" x2="12" y2="12" />
+    <line x1="12" y1="8" x2="12.01" y2="8" />
+  </svg>
+);
+
 const IndexPage = () => {
   const [shapes, setShapes] = useState(INITIAL_SHAPES);
   const [wsMessages, setWsMessages] = useState([]);
   const [isListening, setIsListening] = useState(false);
+  const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [connected, setConnected] = useState(false);
   const [canvasScale, setCanvasScale] = useState(1);
+  const [showInfo, setShowInfo] = useState(false);
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const canvasContainerRef = useRef(null);
@@ -261,6 +266,7 @@ const IndexPage = () => {
     const ws = new window.WebSocket(WS_URL);
     wsRef.current = ws;
     ws.onmessage = (event) => {
+      setIsWaitingForAI(false);
       const raw = event.data;
       let payload = null;
       try {
@@ -315,7 +321,9 @@ const IndexPage = () => {
         const transcript = event.results[0][0].transcript.trim().toLowerCase();
         setWsMessages(msgs => [...msgs, `[Speech] ${transcript}`]);
         if (wsRef.current && wsRef.current.readyState === 1) {
+          setIsWaitingForAI(true);
           wsRef.current.send(transcript);
+          setTimeout(() => setIsWaitingForAI(false), 50000);
         } else {
           // Try AI (gateway → command-parser/Gemini) first; fall back to local mock if unavailable
           try {
@@ -388,6 +396,26 @@ const IndexPage = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <MicIcon size={24} color="#fff" />
           <span style={{ fontSize: 20, fontWeight: 600 }}>VocalCanvas</span>
+          <button
+            type="button"
+            onClick={() => setShowInfo(true)}
+            aria-label="How it works"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 28,
+              height: 28,
+              padding: 0,
+              border: 'none',
+              borderRadius: '50%',
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.8)',
+              cursor: 'pointer',
+            }}
+          >
+            <InfoIcon size={20} color="currentColor" />
+          </button>
         </div>
         <div style={{
           display: 'flex',
@@ -405,6 +433,65 @@ const IndexPage = () => {
           {connected ? 'Connected' : 'Disconnected'}
         </div>
       </header>
+
+      {/* How it works overlay */}
+      {showInfo && (
+        <div
+          role="dialog"
+          aria-label="How VocalCanvas works"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.5)',
+          }}
+          onClick={() => setShowInfo(false)}
+        >
+          <div
+            style={{
+              background: COLORS.chrome,
+              border: `1px solid ${COLORS.chromeLight}`,
+              borderRadius: 12,
+              padding: '24px 28px',
+              maxWidth: 360,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <span style={{ fontSize: 18, fontWeight: 600, color: '#fff' }}>How it works</span>
+              <button
+                type="button"
+                onClick={() => setShowInfo(false)}
+                aria-label="Close"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.7)',
+                  cursor: 'pointer',
+                  fontSize: 20,
+                  lineHeight: 1,
+                  padding: 4,
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <p style={{ fontSize: 14, color: '#e2e8f0', lineHeight: 1.6, margin: 0 }}>
+              <strong style={{ color: '#fff' }}>Open mic</strong> — Tap the microphone and speak your idea in plain words (e.g. “draw a red circle”, “write Hello”, “draw a stickman”).
+            </p>
+            <p style={{ fontSize: 14, color: '#e2e8f0', lineHeight: 1.6, margin: '12px 0 0' }}>
+              <strong style={{ color: '#fff' }}>Keep your idea in creation</strong> — The AI turns your speech into shapes and text on the canvas. You can drag shapes to move them. Say “clear” to start over.
+            </p>
+            <p style={{ fontSize: 12, color: COLORS.hint, lineHeight: 1.5, margin: '16px 0 0' }}>
+              When the status shows Connected, your commands are processed in real time. If it shows Disconnected, the app will still try to interpret your speech.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Main: canvas + command log */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0, minWidth: 0 }}>
@@ -549,7 +636,7 @@ const IndexPage = () => {
       }}>
         <button
           onClick={handleSpeech}
-          disabled={isListening}
+          disabled={isListening || isWaitingForAI}
           style={{
             width: 64,
             height: 64,
@@ -557,18 +644,18 @@ const IndexPage = () => {
             border: 'none',
             background: COLORS.micButton,
             color: '#fff',
-            cursor: isListening ? 'wait' : 'pointer',
+            cursor: isListening || isWaitingForAI ? 'wait' : 'pointer',
             boxShadow: '0 4px 20px rgba(66, 153, 225, 0.5)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
           }}
-          title={isListening ? 'Listening...' : 'Speak command'}
+          title={isListening ? 'Listening...' : isWaitingForAI ? 'AI responding...' : 'Speak command'}
         >
           <MicIcon size={28} color="#fff" />
         </button>
         <span style={{ fontSize: 14, color: '#e2e8f0' }}>
-          {isListening ? 'Listening...' : 'Speak command'}
+          {isListening ? 'Listening...' : isWaitingForAI ? 'AI responding...' : 'Speak command'}
         </span>
         <span style={{ fontSize: 12, color: COLORS.hint }}>
           Try saying &quot;draw a yellow star&quot;

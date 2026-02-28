@@ -18,7 +18,6 @@ Turns speech into structured whiteboard commands using **Google Gemini** (free t
    ```sh
    # From repo root, venv already activated
    pip install -r services/command-parser/requirements.txt
-   python services/command-parser/verify_install.py   # should print "OK"
    python -m uvicorn app:app --reload --port 5000 --app-dir services/command-parser
    ```
 
@@ -26,14 +25,13 @@ Turns speech into structured whiteboard commands using **Google Gemini** (free t
 
    ```sh
    cd services/command-parser
-   python -m pip install -r requirements.txt
-   python verify_install.py
-   python -m uvicorn app:app --reload --port 5000
+   pip install -r requirements.txt
+   uvicorn app:app --reload --port 5000
    ```
 
    If you didn’t use a `.env` file, run: `export GOOGLE_API_KEY="your-key"` in the same terminal before `uvicorn`.
 
-4. **Optional:** `GEMINI_MODEL` (default: `gemini-1.5-flash`). Keep default for free tier.
+4. **Optional:** `GEMINI_MODEL` (default: `gemini-2.5-flash` for free-tier quota). Override in `.env` if you get 404.
 
 **If you get 403 or the frontend keeps using the fallback:** Gemini returned 403 = wrong key or API not allowed. Use a key from [Google AI Studio](https://aistudio.google.com/apikey) (same account, create new key if needed). Don’t use a key from Google Cloud Console unless you’ve enabled the “Generative Language API” for that project.
 

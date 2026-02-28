@@ -3,8 +3,12 @@ Pydantic models for whiteboard commands. Matches frontend applyCommand() and pro
 Used for LangChain structured output so Gemini returns valid JSON.
 """
 from __future__ import annotations
-from typing import Literal, Union, Optional, List
+from typing import Literal, Union, Optional, List, Annotated
 from pydantic import BaseModel, Field
+from pydantic import ConfigDict
+
+# Ignore extra keys from Gemini so we don't fail on minor schema drift
+_model_extra = ConfigDict(extra="ignore")
 
 
 # Canvas: 800x600, center (400, 300)
@@ -13,6 +17,7 @@ CENTER_Y = 300
 
 
 class DrawCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["DRAW"] = "DRAW"
     shape: Literal["circle", "rectangle"]
     x: int = CENTER_X
@@ -24,6 +29,7 @@ class DrawCommand(BaseModel):
 
 
 class WriteCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["WRITE"] = "WRITE"
     text: str
     x: int = CENTER_X
@@ -33,6 +39,7 @@ class WriteCommand(BaseModel):
 
 
 class MoveCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["MOVE"] = "MOVE"
     id: str
     x: Optional[int] = None
@@ -42,32 +49,38 @@ class MoveCommand(BaseModel):
 
 
 class ResizeCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["RESIZE"] = "RESIZE"
     id: str
     scale: float
 
 
 class RotateCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["ROTATE"] = "ROTATE"
     id: str
     degrees: Union[int, float]
 
 
 class DeleteCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["DELETE"] = "DELETE"
     id: str
 
 
 class ClearCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["CLEAR"] = "CLEAR"
 
 
 class ErrorCommand(BaseModel):
+    model_config = _model_extra
     type: Literal["ERROR"] = "ERROR"
     reason: str = "unclear"
 
 
-WhiteboardCommand = Union[
+WhiteboardCommand = Annotated[
+    Union[
     DrawCommand,
     WriteCommand,
     MoveCommand,
@@ -76,6 +89,8 @@ WhiteboardCommand = Union[
     DeleteCommand,
     ClearCommand,
     ErrorCommand,
+    ],
+    Field(discriminator="type"),
 ]
 
 

@@ -3,8 +3,10 @@ Command parser service: speech → structured whiteboard commands.
 Uses Google Gemini (free tier) via LangChain; no local model download.
 """
 from __future__ import annotations
+import json
 import logging
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -43,14 +45,13 @@ def _catch_all(_request, exc):
 
 # Gemini: free tier, no local model. Get key at https://aistudio.google.com/apikey
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+# Default: gemini-2.5-flash has free-tier quota (5 RPM, 20 RPD). gemini-2.0-flash often shows 0/0 and returns 429.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 if API_KEY:
     llm = ChatGoogleGenerativeAI(model=MODEL, google_api_key=API_KEY, temperature=0)
-    parser = llm.with_structured_output(ParseResponse)
 else:
     llm = None
-    parser = None
 
 
 class ParseRequest(BaseModel):
@@ -71,7 +72,7 @@ def health():
 async def parse(req: ParseRequest):
     if not req.speech or not req.speech.strip():
         raise HTTPException(status_code=400, detail="speech is required")
-    if parser is None:
+    if llm is None:
         raise HTTPException(
             status_code=503,
             detail="Gemini not configured. Set GOOGLE_API_KEY or GEMINI_API_KEY (free at https://aistudio.google.com/apikey)",
@@ -84,22 +85,51 @@ async def parse(req: ParseRequest):
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=user_content),
         ]
-        result: ParseResponse = parser.invoke(messages)
-        # Convert Pydantic models to dicts for JSON response
-        commands = [c.model_dump() for c in result.commands]
-        return ParseResponseBody(commands=commands)
+        # Raw JSON output: avoid LangChain structured-output passing commands as strings
+        response = llm.invoke(messages)
+        text = (response.content if hasattr(response, "content") else str(response)).strip()
+        # Strip markdown code block if present
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+        if not isinstance(data.get("commands"), list):
+            raise ValueError("Response must have a 'commands' array")
+        # Normalize: Gemini sometimes returns commands as list of JSON strings
+        raw_commands = data["commands"]
+        commands = []
+        for c in raw_commands:
+            if isinstance(c, str):
+                c = json.loads(c)
+            commands.append(c)
+        # Validate and allow only known fields (Pydantic will coerce types)
+        result = ParseResponse.model_validate({"commands": commands})
+        out = [cmd.model_dump() for cmd in result.commands]
+        if len(out) == 1 and out[0].get("type") == "ERROR":
+            log.warning("Model returned ERROR: %s (speech was: %r)", out[0].get("reason", "unclear"), req.speech[:80])
+        return ParseResponseBody(commands=out)
     except Exception as e:
         # Always return 200 + ERROR so gateway gets 200 and frontend can use fallback; never leak 403/5xx
         err_msg = str(e)
         status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
+        reason = "unclear"
         if status == 403 or "403" in err_msg or "Forbidden" in err_msg:
             log.error(
                 "Gemini API 403: Check GOOGLE_API_KEY in .env. "
                 "Get a free key at https://aistudio.google.com/apikey"
             )
+            reason = "api key invalid or forbidden"
+        elif status == 429 or "429" in err_msg or "ResourceExhausted" in type(e).__name__ or "quota" in err_msg.lower():
+            log.error(
+                "Gemini API 429: Quota / rate limit exceeded. "
+                "Try another API key from https://aistudio.google.com/apikey or wait and retry. "
+                "See https://ai.google.dev/gemini-api/docs/rate-limits"
+            )
+            reason = "quota exceeded"
         else:
-            log.exception("Parse failed")
-        return ParseResponseBody(commands=[{"type": "ERROR", "reason": "unclear"}])
+            log.exception("Parse failed (exception below) - speech was: %r", req.speech[:80])
+            log.error("Exception message: %s", err_msg)
+        return ParseResponseBody(commands=[{"type": "ERROR", "reason": reason}])
 
 
 @app.get("/")

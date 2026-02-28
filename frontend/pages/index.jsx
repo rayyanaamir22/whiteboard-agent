@@ -14,6 +14,89 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
 // Canvas size to match prompt.js
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 600;
+const CENTER_X = 400;
+const CENTER_Y = 300;
+
+// Generate unique shape id
+let shapeIdCounter = 0;
+const nextShapeId = () => `shape-${Date.now()}-${++shapeIdCounter}`;
+
+// Apply a command from the agent to the shapes state (matches prompt.js schema)
+function applyCommand(setShapes, command) {
+  if (!command || !command.type) return null;
+  const t = command.type;
+
+  if (t === 'DRAW') {
+    const id = nextShapeId();
+    const x = command.x ?? CENTER_X;
+    const y = command.y ?? CENTER_Y;
+    const color = command.color || 'black';
+    if (command.shape === 'circle') {
+      const radius = command.radius ?? 50;
+      setShapes(prev => [...prev, { id, type: 'circle', x, y, radius, fill: color, stroke: color }]);
+      return `Circle created at [${x}, ${y}]`;
+    }
+    if (command.shape === 'rectangle') {
+      const width = command.width ?? 100;
+      const height = command.height ?? 100;
+      setShapes(prev => [...prev, { id, type: 'rectangle', x, y, width, height, fill: color, stroke: color }]);
+      return `Square created at [${x}, ${y}]`;
+    }
+    return null;
+  }
+
+  if (t === 'WRITE') {
+    const id = nextShapeId();
+    const x = command.x ?? CENTER_X;
+    const y = command.y ?? CENTER_Y;
+    const text = command.text ?? '';
+    const fontSize = command.fontSize ?? 24;
+    const color = command.color || 'black';
+    setShapes(prev => [...prev, { id, type: 'text', x, y, text, fontSize, fill: color }]);
+    return 'Text added';
+  }
+
+  if (t === 'DELETE') {
+    setShapes(prev => prev.filter(s => s.id !== command.id));
+    return `Deleted ${command.id}`;
+  }
+
+  if (t === 'CLEAR') {
+    setShapes([]);
+    return 'Canvas cleared';
+  }
+
+  if (t === 'MOVE') {
+    setShapes(prev => prev.map(s => s.id === command.id ? { ...s, x: command.x, y: command.y } : s));
+    return `Moved to [${command.x}, ${command.y}]`;
+  }
+
+  if (t === 'ERROR') {
+    return null; // already handled in log
+  }
+  return null;
+}
+
+// Simple mock command from transcript when agent is disconnected (for testing)
+function getMockCommand(transcript) {
+  const t = transcript.toLowerCase();
+  if (t.includes('clear')) return { type: 'CLEAR' };
+  // Check circle before rectangle so "draw a red circle" -> circle not square
+  if (t.includes('circle')) {
+    const color = t.includes('red') ? 'red' : t.includes('blue') ? 'blue' : t.includes('green') ? 'green' : t.includes('yellow') ? 'yellow' : 'black';
+    return { type: 'DRAW', shape: 'circle', x: CENTER_X, y: CENTER_Y, radius: 50, color };
+  }
+  if (t.includes('draw') || t.includes('square') || t.includes('rectangle') || t.includes('rect')) {
+    const color = t.includes('red') ? 'red' : t.includes('blue') ? 'blue' : t.includes('green') ? 'green' : t.includes('yellow') ? 'yellow' : 'black';
+    return { type: 'DRAW', shape: 'rectangle', x: CENTER_X, y: CENTER_Y, width: 100, height: 100, color };
+  }
+  if (t.includes('write ') || t.startsWith('write')) {
+    const match = transcript.match(/write\s+(.+)/i);
+    const text = match ? match[1].trim() : transcript.replace(/^write\s*/i, '');
+    return { type: 'WRITE', text: text || 'Hello', x: CENTER_X, y: CENTER_Y };
+  }
+  return null;
+}
 
 // Initial shapes: one rectangle, one circle, one text (VocalCanvas-style)
 const INITIAL_SHAPES = [
@@ -56,12 +139,26 @@ const IndexPage = () => {
   const recognitionRef = useRef(null);
   const canvasContainerRef = useRef(null);
 
-  // WebSocket setup
+  // WebSocket setup: receive JSON commands, apply to canvas, add to log
   useEffect(() => {
     const ws = new window.WebSocket(WS_URL);
     wsRef.current = ws;
     ws.onmessage = (event) => {
-      setWsMessages(msgs => [...msgs, event.data]);
+      const raw = event.data;
+      let cmd = null;
+      try {
+        cmd = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      } catch (_) {}
+      if (cmd && typeof cmd === 'object' && cmd.type) {
+        const summary = applyCommand(setShapes, cmd);
+        if (summary) {
+          setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
+        } else if (cmd.type === 'ERROR') {
+          setWsMessages(msgs => [...msgs, `[AI] Error: ${cmd.reason || 'unclear'}`]);
+        }
+      } else {
+        setWsMessages(msgs => [...msgs, raw]);
+      }
     };
     ws.onopen = () => {
       setConnected(true);
@@ -103,11 +200,17 @@ const IndexPage = () => {
       recognitionRef.current.interimResults = false;
       recognitionRef.current.lang = 'en-US';
       recognitionRef.current.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
+        const transcript = event.results[0][0].transcript.trim().toLowerCase();
         setWsMessages(msgs => [...msgs, `[Speech] ${transcript}`]);
-        // Optionally send to WebSocket
         if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(transcript);
+        } else {
+          // Mock when agent disconnected: try to parse simple commands for testing
+          const mock = getMockCommand(transcript);
+          if (mock) {
+            const summary = applyCommand(setShapes, mock);
+            if (summary) setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
+          }
         }
         setIsListening(false);
       };
@@ -118,10 +221,14 @@ const IndexPage = () => {
     recognitionRef.current.start();
   };
 
-  // Command log entries: show [Speech] as YOU:, others as AI: (skip raw [WebSocket ...] in log)
+  // Command log entries: [Speech] -> YOU:, [AI] -> AI: (strip prefix), skip [WebSocket ...]
   const logEntries = wsMessages
     .filter(m => !m.startsWith('[WebSocket'))
-    .map(m => m.startsWith('[Speech] ') ? { role: 'you', text: m.replace('[Speech] ', '') } : { role: 'ai', text: m });
+    .map(m => {
+      if (m.startsWith('[Speech] ')) return { role: 'you', text: m.replace('[Speech] ', '') };
+      if (m.startsWith('[AI] ')) return { role: 'ai', text: m.replace('[AI] ', '') };
+      return { role: 'ai', text: m };
+    });
 
   return (
     <div style={{

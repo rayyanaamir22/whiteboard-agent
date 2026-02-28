@@ -10,6 +10,7 @@ const Circle = dynamic(() => import('react-konva').then(mod => mod.Circle), { ss
 const Text = dynamic(() => import('react-konva').then(mod => mod.Text), { ssr: false });
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
+const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:3001';
 
 // Canvas size to match prompt.js
 const CANVAS_WIDTH = 800;
@@ -310,13 +311,31 @@ const IndexPage = () => {
       recognitionRef.current.continuous = false;
       recognitionRef.current.interimResults = false;
       recognitionRef.current.lang = 'en-US';
-      recognitionRef.current.onresult = (event) => {
+      recognitionRef.current.onresult = async (event) => {
         const transcript = event.results[0][0].transcript.trim().toLowerCase();
         setWsMessages(msgs => [...msgs, `[Speech] ${transcript}`]);
         if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(transcript);
         } else {
-          // Mock when agent disconnected: try to parse simple commands (single or multiple)
+          // Try AI (gateway → command-parser/Gemini) first; fall back to local mock if unavailable
+          try {
+            const res = await fetch(`${GATEWAY_URL}/api/command/parse`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ speech: transcript, context: { shapes: shapesRef.current.length } }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const payload = data.commands && data.commands.length ? { commands: data.commands } : null;
+              if (payload) {
+                processCommandPayload(setShapes, setWsMessages, payload);
+                setIsListening(false);
+                return;
+              }
+            }
+          } catch (_) {
+            // Gateway or command-parser down: use mock
+          }
           const mock = getMockCommand(transcript, shapesRef.current);
           if (mock) processCommandPayload(setShapes, setWsMessages, mock);
         }

@@ -41,3 +41,26 @@ env/
 .Trashes
 ehthumbs.db
 Thumbs.db
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Env (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Debug / IDE
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+*.log
+
+# Build / cache
+dist/
+build/
+.cache/

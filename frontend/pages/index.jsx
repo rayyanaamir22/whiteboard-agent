@@ -1,6 +1,7 @@
 // This file requires Next.js, React, and react-konva dependencies. Now using plain JavaScript.
 import React, { useRef, useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
+import toast, { Toaster } from 'react-hot-toast';
 
 // Dynamically import Konva to avoid SSR issues
 const Stage = dynamic(() => import('react-konva').then(mod => mod.Stage), { ssr: false });
@@ -375,44 +376,48 @@ const IndexPage = () => {
   const currentSessionId = "test-room-123"; // Hardcoded for testing
 
   const saveWhiteboard = async () => {
-    try {
-      console.log("Saving whiteboard to Gateway...");
-      const response = await fetch(`${GATEWAY_URL}/api/session/save`, {
+    // We wrap the whole fetch in a toast.promise!
+    toast.promise(
+      fetch(`${GATEWAY_URL}/api/session/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            sessionId: currentSessionId, 
-            canvasState: shapes 
-        })
-      });
-      
-      const result = await response.json();
-      console.log("Save Result:", result);
-      alert("Whiteboard saved successfully!");
-    } catch (error) {
-      console.error("Failed to save:", error);
-      alert("Error saving whiteboard.");
-    }
+        body: JSON.stringify({ sessionId: currentSessionId, canvasState: shapes })
+      }).then(async (res) => {
+        if (!res.ok) throw new Error('Network response was not ok');
+        return res.json();
+      }),
+      {
+        loading: 'Saving to database...',
+        success: 'Whiteboard saved successfully! 🚀',
+        error: 'Failed to save whiteboard.',
+      },
+      {
+        style: { minWidth: '250px', background: '#2c5282', color: '#fff' } // Matches your VocalCanvas theme!
+      }
+    );
   };
 
   const loadWhiteboard = async () => {
-    try {
-      console.log("Loading whiteboard from Gateway...");
-      const response = await fetch(`${GATEWAY_URL}/api/session/load/${currentSessionId}`);
-      const result = await response.json();
-      
-      if (result.data && result.data.canvasData) {
-        setShapes(result.data.canvasData);
-        console.log("Whiteboard Loaded!");
-        alert("Whiteboard loaded successfully!");
-      } else {
-        console.error("No data found or load failed:", result);
-        alert("No saved data found for this room.");
+    toast.promise(
+      fetch(`${GATEWAY_URL}/api/session/load/${currentSessionId}`)
+        .then(async (res) => {
+          const result = await res.json();
+          if (result.data && result.data.canvasData) {
+            setShapes(result.data.canvasData);
+            return result;
+          } else {
+            throw new Error('No data found');
+          }
+        }),
+      {
+        loading: 'Loading room...',
+        success: 'Whiteboard loaded! 🎨',
+        error: 'No saved data found for this room.',
+      },
+      {
+        style: { minWidth: '250px', background: '#2c5282', color: '#fff' }
       }
-    } catch (error) {
-      console.error("Failed to load:", error);
-      alert("Error loading whiteboard.");
-    }
+    );
   };
 
   return (
@@ -427,6 +432,7 @@ const IndexPage = () => {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       boxSizing: 'border-box',
     }}>
+      <Toaster position="bottom-right" reverseOrder={false} />
       {/* Top header */}
       <header style={{
         flexShrink: 0,

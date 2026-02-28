@@ -370,6 +370,50 @@ const IndexPage = () => {
       if (m.startsWith('[AI] ')) return { role: 'ai', text: m.replace('[AI] ', '') };
       return { role: 'ai', text: m };
     });
+  
+  // --- NEW SESSION INTEGRATION CODE ---
+  const currentSessionId = "test-room-123"; // Hardcoded for testing
+
+  const saveWhiteboard = async () => {
+    try {
+      console.log("Saving whiteboard to Gateway...");
+      const response = await fetch(`${GATEWAY_URL}/api/session/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+            sessionId: currentSessionId, 
+            canvasState: shapes 
+        })
+      });
+      
+      const result = await response.json();
+      console.log("Save Result:", result);
+      alert("Whiteboard saved successfully!");
+    } catch (error) {
+      console.error("Failed to save:", error);
+      alert("Error saving whiteboard.");
+    }
+  };
+
+  const loadWhiteboard = async () => {
+    try {
+      console.log("Loading whiteboard from Gateway...");
+      const response = await fetch(`${GATEWAY_URL}/api/session/load/${currentSessionId}`);
+      const result = await response.json();
+      
+      if (result.data && result.data.canvasData) {
+        setShapes(result.data.canvasData);
+        console.log("Whiteboard Loaded!");
+        alert("Whiteboard loaded successfully!");
+      } else {
+        console.error("No data found or load failed:", result);
+        alert("No saved data found for this room.");
+      }
+    } catch (error) {
+      console.error("Failed to load:", error);
+      alert("Error loading whiteboard.");
+    }
+  };
 
   return (
     <div style={{
@@ -417,20 +461,41 @@ const IndexPage = () => {
             <InfoIcon size={20} color="currentColor" />
           </button>
         </div>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          color: connected ? COLORS.connected : COLORS.disconnected,
-          fontSize: 14,
-        }}>
-          <span style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: connected ? COLORS.connected : COLORS.disconnected,
-          }} />
-          {connected ? 'Connected' : 'Disconnected'}
+
+        {/* NEW: Save and Load Buttons + Status */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button 
+              onClick={saveWhiteboard} 
+              style={{ background: COLORS.micButton, color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              Save Room
+            </button>
+            <button 
+              onClick={loadWhiteboard} 
+              style={{ background: COLORS.connected, color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              Load Room
+            </button>
+          </div>
+
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            color: connected ? COLORS.connected : COLORS.disconnected,
+            fontSize: 14,
+            borderLeft: `1px solid ${COLORS.chromeLight}`,
+            paddingLeft: 16
+          }}>
+            <span style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: connected ? COLORS.connected : COLORS.disconnected,
+            }} />
+            {connected ? 'Connected' : 'Disconnected'}
+          </div>
         </div>
       </header>
 

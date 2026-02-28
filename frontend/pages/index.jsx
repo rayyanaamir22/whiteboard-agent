@@ -67,8 +67,40 @@ function applyCommand(setShapes, command) {
   }
 
   if (t === 'MOVE') {
-    setShapes(prev => prev.map(s => s.id === command.id ? { ...s, x: command.x, y: command.y } : s));
+    const useRelative = 'deltaX' in command || 'deltaY' in command;
+    setShapes(prev => prev.map(s => {
+      if (s.id !== command.id) return s;
+      if (useRelative) {
+        const dx = command.deltaX ?? 0;
+        const dy = command.deltaY ?? 0;
+        return { ...s, x: s.x + dx, y: s.y + dy };
+      }
+      return { ...s, x: command.x, y: command.y };
+    }));
+    if (useRelative) {
+      const dx = command.deltaX ?? 0;
+      const dy = command.deltaY ?? 0;
+      return `Moved by (${dx}, ${dy})`;
+    }
     return `Moved to [${command.x}, ${command.y}]`;
+  }
+
+  if (t === 'RESIZE') {
+    const scale = command.scale ?? 1;
+    setShapes(prev => prev.map(s => {
+      if (s.id !== command.id) return s;
+      if (s.type === 'rectangle') return { ...s, width: (s.width || 100) * scale, height: (s.height || 100) * scale };
+      if (s.type === 'circle') return { ...s, radius: (s.radius || 50) * scale };
+      if (s.type === 'text') return { ...s, fontSize: (s.fontSize || 24) * scale };
+      return s;
+    }));
+    return `Resized by ${scale}x`;
+  }
+
+  if (t === 'ROTATE') {
+    const degrees = command.degrees ?? 0;
+    setShapes(prev => prev.map(s => s.id === command.id ? { ...s, rotation: (s.rotation || 0) + degrees } : s));
+    return `Rotated ${degrees}°`;
   }
 
   if (t === 'ERROR') {
@@ -77,11 +109,98 @@ function applyCommand(setShapes, command) {
   return null;
 }
 
-// Simple mock command from transcript when agent is disconnected (for testing)
-function getMockCommand(transcript) {
+// Normalize payload to command list and run each (used by WebSocket and mock).
+// Payload can be: single command { type, ... }, array [cmd, ...], or { commands: [cmd, ...] }.
+function processCommandPayload(setShapes, setWsMessages, payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const commands = Array.isArray(payload)
+    ? payload
+    : payload.commands && Array.isArray(payload.commands)
+      ? payload.commands
+      : payload.type
+        ? [payload]
+        : [];
+  for (const cmd of commands) {
+    if (!cmd || typeof cmd !== 'object' || !cmd.type) continue;
+    if (cmd.type === 'ERROR') {
+      setWsMessages(msgs => [...msgs, `[AI] Error: ${cmd.reason || 'unclear'}`]);
+      continue;
+    }
+    const summary = applyCommand(setShapes, cmd);
+    if (summary) setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
+  }
+}
+
+// Pick which shape to target from transcript (for RESIZE/ROTATE/MOVE/DELETE mock).
+// Returns shape id or null. Falls back to first shape if no specifier.
+function pickTargetShapeId(shapes, transcript) {
+  if (!shapes.length) return null;
   const t = transcript.toLowerCase();
+  // Explicit: "the last one", "last", "the first one", "first", "second", "third"
+  if (/\b(last|the last one)\b/.test(t)) return shapes[shapes.length - 1].id;
+  if (/\b(first|the first one)\b/.test(t)) return shapes[0].id;
+  if (/\b(second|the second one)\b/.test(t) && shapes.length > 1) return shapes[1].id;
+  if (/\b(third|the third one)\b/.test(t) && shapes.length > 2) return shapes[2].id;
+  // By type: "the circle", "the rectangle", "the text"
+  if (/\b(the )?circle\b/.test(t)) { const s = shapes.find(sh => sh.type === 'circle'); if (s) return s.id; }
+  if (/\b(the )?(rectangle|rect|square)\b/.test(t)) { const s = shapes.find(sh => sh.type === 'rectangle'); if (s) return s.id; }
+  if (/\b(the )?text\b/.test(t)) { const s = shapes.find(sh => sh.type === 'text'); if (s) return s.id; }
+  // By color: "the red one", "the blue one" (named or hex)
+  const colorToFills = { red: ['red', '#e57373', '#c62828'], blue: ['blue', '#64b5f6', '#1976d2'], green: ['green'], yellow: ['yellow'], black: ['black'] };
+  for (const [c, fills] of Object.entries(colorToFills)) {
+    if (new RegExp(`\\b(the )?${c}( one)?\\b`).test(t)) {
+      const s = shapes.find(sh => {
+        const f = (sh.fill || '').toLowerCase();
+        return f.includes(c) || fills.some(v => f === v.toLowerCase());
+      });
+      if (s) return s.id;
+    }
+  }
+  return shapes[0].id; // default: first shape
+}
+
+// Simple mock command from transcript when agent is disconnected (for testing)
+function getMockCommand(transcript, shapes = []) {
+  const t = transcript.toLowerCase();
+
   if (t.includes('clear')) return { type: 'CLEAR' };
-  // Check circle before rectangle so "draw a red circle" -> circle not square
+  if (t.includes('write ') || t.startsWith('write')) {
+    const match = transcript.match(/write\s+(.+)/i);
+    const text = match ? match[1].trim() : transcript.replace(/^write\s*/i, '');
+    return { type: 'WRITE', text: text || 'Hello', x: CENTER_X, y: CENTER_Y };
+  }
+  // RESIZE / ROTATE before draw so "make the circle bigger" targets circle, doesn't draw
+  const targetId = pickTargetShapeId(shapes, transcript);
+  if (targetId && (t.includes('bigger') || t.includes('larger') || t.includes('grow'))) {
+    return { type: 'RESIZE', id: targetId, scale: 1.5 };
+  }
+  if (targetId && (t.includes('smaller') || t.includes('shrink'))) {
+    return { type: 'RESIZE', id: targetId, scale: 0.75 };
+  }
+  if (targetId && (t.includes('double') || t.includes('twice'))) {
+    return { type: 'RESIZE', id: targetId, scale: 2 };
+  }
+  if (targetId && (t.includes('rotate') || t.includes('turn'))) {
+    const degMatch = t.match(/(\d+)\s*(degree|deg|°)?/);
+    const degrees = degMatch ? parseInt(degMatch[1], 10) : 45;
+    return { type: 'ROTATE', id: targetId, degrees };
+  }
+  // Multi-command mock before single DRAW: "stick figure", "stickman", "draw a stickman"
+  if (t.includes('stick figure') || t.includes('stickman') || t.includes('stick man')) {
+    const cx = CENTER_X;
+    const color = 'black';
+    return {
+      commands: [
+        { type: 'DRAW', shape: 'circle', x: cx, y: 120, radius: 28, color },
+        { type: 'DRAW', shape: 'rectangle', x: cx - 10, y: 150, width: 20, height: 95, color },
+        { type: 'DRAW', shape: 'rectangle', x: cx - 55, y: 175, width: 55, height: 8, color },
+        { type: 'DRAW', shape: 'rectangle', x: cx, y: 175, width: 55, height: 8, color },
+        { type: 'DRAW', shape: 'rectangle', x: cx - 12, y: 245, width: 8, height: 75, color },
+        { type: 'DRAW', shape: 'rectangle', x: cx + 4, y: 245, width: 8, height: 75, color },
+      ],
+    };
+  }
+  // DRAW: circle before rectangle so "draw a red circle" -> circle
   if (t.includes('circle')) {
     const color = t.includes('red') ? 'red' : t.includes('blue') ? 'blue' : t.includes('green') ? 'green' : t.includes('yellow') ? 'yellow' : 'black';
     return { type: 'DRAW', shape: 'circle', x: CENTER_X, y: CENTER_Y, radius: 50, color };
@@ -89,11 +208,6 @@ function getMockCommand(transcript) {
   if (t.includes('draw') || t.includes('square') || t.includes('rectangle') || t.includes('rect')) {
     const color = t.includes('red') ? 'red' : t.includes('blue') ? 'blue' : t.includes('green') ? 'green' : t.includes('yellow') ? 'yellow' : 'black';
     return { type: 'DRAW', shape: 'rectangle', x: CENTER_X, y: CENTER_Y, width: 100, height: 100, color };
-  }
-  if (t.includes('write ') || t.startsWith('write')) {
-    const match = transcript.match(/write\s+(.+)/i);
-    const text = match ? match[1].trim() : transcript.replace(/^write\s*/i, '');
-    return { type: 'WRITE', text: text || 'Hello', x: CENTER_X, y: CENTER_Y };
   }
   return null;
 }
@@ -138,6 +252,8 @@ const IndexPage = () => {
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const canvasContainerRef = useRef(null);
+  const shapesRef = useRef(shapes);
+  shapesRef.current = shapes;
 
   // WebSocket setup: receive JSON commands, apply to canvas, add to log
   useEffect(() => {
@@ -145,20 +261,15 @@ const IndexPage = () => {
     wsRef.current = ws;
     ws.onmessage = (event) => {
       const raw = event.data;
-      let cmd = null;
+      let payload = null;
       try {
-        cmd = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
       } catch (_) {}
-      if (cmd && typeof cmd === 'object' && cmd.type) {
-        const summary = applyCommand(setShapes, cmd);
-        if (summary) {
-          setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
-        } else if (cmd.type === 'ERROR') {
-          setWsMessages(msgs => [...msgs, `[AI] Error: ${cmd.reason || 'unclear'}`]);
-        }
-      } else {
+      if (!payload || typeof payload !== 'object') {
         setWsMessages(msgs => [...msgs, raw]);
+        return;
       }
+      processCommandPayload(setShapes, setWsMessages, payload);
     };
     ws.onopen = () => {
       setConnected(true);
@@ -205,12 +316,9 @@ const IndexPage = () => {
         if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(transcript);
         } else {
-          // Mock when agent disconnected: try to parse simple commands for testing
-          const mock = getMockCommand(transcript);
-          if (mock) {
-            const summary = applyCommand(setShapes, mock);
-            if (summary) setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
-          }
+          // Mock when agent disconnected: try to parse simple commands (single or multiple)
+          const mock = getMockCommand(transcript, shapesRef.current);
+          if (mock) processCommandPayload(setShapes, setWsMessages, mock);
         }
         setIsListening(false);
       };
@@ -219,6 +327,12 @@ const IndexPage = () => {
     }
     setIsListening(true);
     recognitionRef.current.start();
+  };
+
+  // Sync drag to state; backend can use relative MOVE (deltaX/deltaY) so drag never conflicts
+  const handleShapeDragEnd = (shapeId, e) => {
+    const node = e.target;
+    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, x: node.x(), y: node.y() } : s));
   };
 
   // Command log entries: [Speech] -> YOU:, [AI] -> AI: (strip prefix), skip [WebSocket ...]
@@ -314,7 +428,9 @@ const IndexPage = () => {
                         height={shape.height}
                         fill={shape.fill}
                         stroke={shape.stroke}
+                        rotation={shape.rotation || 0}
                         draggable
+                        onDragEnd={(e) => handleShapeDragEnd(shape.id, e)}
                       />
                     );
                   }
@@ -327,7 +443,9 @@ const IndexPage = () => {
                         radius={shape.radius}
                         fill={shape.fill}
                         stroke={shape.stroke}
+                        rotation={shape.rotation || 0}
                         draggable
+                        onDragEnd={(e) => handleShapeDragEnd(shape.id, e)}
                       />
                     );
                   }
@@ -340,7 +458,9 @@ const IndexPage = () => {
                         text={shape.text}
                         fontSize={shape.fontSize || 24}
                         fill={shape.fill || 'black'}
+                        rotation={shape.rotation || 0}
                         draggable
+                        onDragEnd={(e) => handleShapeDragEnd(shape.id, e)}
                       />
                     );
                   }

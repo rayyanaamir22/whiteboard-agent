@@ -1,4 +1,14 @@
 {
   "name": "canvas",
-  "version": "0.1.0"
-} 
+  "version": "0.1.0",
+  "description": "WebSocket server: transcript → gateway parse → commands back to frontend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "ws": "^8.14.2"
+  }
+}

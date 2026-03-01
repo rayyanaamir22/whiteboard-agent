@@ -20,7 +20,7 @@ router.post('/parse', rateLimiter, optionalAuth, async (req, res) => {
       speech,
       context,
       user: req.user?.username || 'anonymous'
-    });
+    }, { timeout: 60000 });
     
     res.json(response.data);
   } catch (error) {

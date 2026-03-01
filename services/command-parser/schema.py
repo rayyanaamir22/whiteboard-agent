@@ -19,12 +19,31 @@ CENTER_Y = 300
 class DrawCommand(BaseModel):
     model_config = _model_extra
     type: Literal["DRAW"] = "DRAW"
-    shape: Literal["circle", "rectangle"]
+    shape: Literal[
+        "circle",
+        "rectangle",
+        "arc",
+        "arrow",
+        "line",
+        "ring",
+        "star",
+        "wedge",
+    ]
     x: int = CENTER_X
     y: int = CENTER_Y
-    radius: Optional[int] = None  # circle
+    radius: Optional[int] = None  # circle, wedge
     width: Optional[int] = None  # rectangle
     height: Optional[int] = None
+    # arc / ring: innerRadius, outerRadius, angle (degrees)
+    innerRadius: Optional[int] = None
+    outerRadius: Optional[int] = None
+    angle: Optional[Union[int, float]] = None
+    # star: numPoints, innerRadius, outerRadius
+    numPoints: Optional[int] = None
+    # line / arrow: flat list [x1,y1, x2,y2, ...] (absolute coords)
+    points: Optional[List[Union[int, float]]] = None
+    pointerLength: Optional[int] = None  # arrow
+    pointerWidth: Optional[int] = None  # arrow
     color: str = "black"
 
 

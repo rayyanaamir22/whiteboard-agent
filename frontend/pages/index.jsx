@@ -1,6 +1,7 @@
 // This file requires Next.js, React, and react-konva dependencies. Now using plain JavaScript.
 import React, { useRef, useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
+import toast, { Toaster } from 'react-hot-toast';
 
 // Dynamically import Konva to avoid SSR issues
 const Stage = dynamic(() => import('react-konva').then(mod => mod.Stage), { ssr: false });
@@ -111,8 +112,8 @@ function applyCommand(setShapes, command) {
 }
 
 // Normalize payload to command list and run each (used by WebSocket and mock).
-// Payload can be: single command { type, ... }, array [cmd, ...], or { commands: [cmd, ...] }.
-function processCommandPayload(setShapes, setWsMessages, payload) {
+// If shapesRef is passed, resolve placeholder ids to real ids for MOVE/DELETE/RESIZE/ROTATE.
+function processCommandPayload(setShapes, setWsMessages, payload, shapesRef) {
   if (!payload || typeof payload !== 'object') return;
   const commands = Array.isArray(payload)
     ? payload
@@ -121,15 +122,47 @@ function processCommandPayload(setShapes, setWsMessages, payload) {
       : payload.type
         ? [payload]
         : [];
+  const shapes = shapesRef?.current ?? [];
   for (const cmd of commands) {
     if (!cmd || typeof cmd !== 'object' || !cmd.type) continue;
     if (cmd.type === 'ERROR') {
       setWsMessages(msgs => [...msgs, `[AI] Error: ${cmd.reason || 'unclear'}`]);
       continue;
     }
-    const summary = applyCommand(setShapes, cmd);
+    let toApply = cmd;
+    if (cmd.id && (cmd.type === 'MOVE' || cmd.type === 'DELETE' || cmd.type === 'RESIZE' || cmd.type === 'ROTATE')) {
+      const resolved = resolveShapeId(shapes, cmd.id);
+      if (resolved) toApply = { ...cmd, id: resolved };
+    }
+    const summary = applyCommand(setShapes, toApply);
     if (summary) setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
   }
+}
+
+// Resolve backend id (real id or placeholder like "last", "first", "the red circle") to real shape id.
+// Fallback when LLM returns a placeholder instead of id from context.
+function resolveShapeId(shapes, idStr) {
+  if (!shapes.length || idStr == null || idStr === '') return null;
+  const str = String(idStr).toLowerCase().trim();
+  if (shapes.some(s => s.id === idStr)) return idStr;
+  if (/\b(last|the last one)\b/.test(str)) return shapes[shapes.length - 1].id;
+  if (/\b(first|the first one)\b/.test(str)) return shapes[0].id;
+  if (/\b(second|the second one)\b/.test(str) && shapes.length > 1) return shapes[1].id;
+  if (/\b(third|the third one)\b/.test(str) && shapes.length > 2) return shapes[2].id;
+  if (/\b(the )?circle\b/.test(str)) { const s = shapes.find(sh => sh.type === 'circle'); if (s) return s.id; }
+  if (/\b(the )?(rectangle|rect|square)\b/.test(str)) { const s = shapes.find(sh => sh.type === 'rectangle'); if (s) return s.id; }
+  if (/\b(the )?text\b/.test(str)) { const s = shapes.find(sh => sh.type === 'text'); if (s) return s.id; }
+  const colorToFills = { red: ['red', '#e57373', '#c62828'], blue: ['blue', '#64b5f6', '#1976d2'], green: ['green'], yellow: ['yellow'], black: ['black'] };
+  for (const [c, fills] of Object.entries(colorToFills)) {
+    if (new RegExp(`\\b(the )?${c}( one)?\\b`).test(str)) {
+      const s = shapes.find(sh => {
+        const f = (sh.fill || '').toLowerCase();
+        return f.includes(c) || fills.some(v => f === v.toLowerCase());
+      });
+      if (s) return s.id;
+    }
+  }
+  return null;
 }
 
 // Pick which shape to target from transcript (for RESIZE/ROTATE/MOVE/DELETE mock).
@@ -213,12 +246,7 @@ function getMockCommand(transcript, shapes = []) {
   return null;
 }
 
-// Initial shapes: one rectangle, one circle, one text (VocalCanvas-style)
-const INITIAL_SHAPES = [
-  { id: 'rect-1', type: 'rectangle', x: 150, y: 100, width: 100, height: 100, fill: '#e57373', stroke: '#c62828' },
-  { id: 'circle-1', type: 'circle', x: 400, y: 350, radius: 50, fill: '#64b5f6', stroke: '#1976d2' },
-  { id: 'text-1', type: 'text', x: 280, y: 250, text: 'Hello', fontSize: 24, fill: 'black' },
-];
+const INITIAL_SHAPES = [];
 
 // VocalCanvas theme
 const COLORS = {
@@ -244,12 +272,22 @@ const MicIcon = ({ size = 24, color = 'currentColor', style = {} }) => (
   </svg>
 );
 
+const InfoIcon = ({ size = 20, color = 'currentColor', style = {} }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', ...style }}>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="16" x2="12" y2="12" />
+    <line x1="12" y1="8" x2="12.01" y2="8" />
+  </svg>
+);
+
 const IndexPage = () => {
   const [shapes, setShapes] = useState(INITIAL_SHAPES);
   const [wsMessages, setWsMessages] = useState([]);
   const [isListening, setIsListening] = useState(false);
+  const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [connected, setConnected] = useState(false);
   const [canvasScale, setCanvasScale] = useState(1);
+  const [showInfo, setShowInfo] = useState(false);
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const canvasContainerRef = useRef(null);
@@ -261,6 +299,7 @@ const IndexPage = () => {
     const ws = new window.WebSocket(WS_URL);
     wsRef.current = ws;
     ws.onmessage = (event) => {
+      setIsWaitingForAI(false);
       const raw = event.data;
       let payload = null;
       try {
@@ -270,7 +309,7 @@ const IndexPage = () => {
         setWsMessages(msgs => [...msgs, raw]);
         return;
       }
-      processCommandPayload(setShapes, setWsMessages, payload);
+      processCommandPayload(setShapes, setWsMessages, payload, shapesRef);
     };
     ws.onopen = () => {
       setConnected(true);
@@ -315,20 +354,43 @@ const IndexPage = () => {
         const transcript = event.results[0][0].transcript.trim().toLowerCase();
         setWsMessages(msgs => [...msgs, `[Speech] ${transcript}`]);
         if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(transcript);
+          setIsWaitingForAI(true);
+          const shapesContext = shapesRef.current.map(s => {
+            const base = { id: s.id, type: s.type, fill: s.fill || s.stroke || 'black' };
+            if (s.type === 'circle') return { ...base, x: s.x, y: s.y, radius: s.radius };
+            if (s.type === 'rectangle') return { ...base, x: s.x, y: s.y, width: s.width, height: s.height };
+            if (s.type === 'text') return { ...base, x: s.x, y: s.y, text: s.text };
+            return base;
+          });
+          wsRef.current.send(JSON.stringify({
+            speech: transcript,
+            context: { shapes: shapesContext },
+          }));
+          setTimeout(() => setIsWaitingForAI(false), 50000);
         } else {
           // Try AI (gateway → command-parser/Gemini) first; fall back to local mock if unavailable
           try {
             const res = await fetch(`${GATEWAY_URL}/api/command/parse`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ speech: transcript, context: { shapes: shapesRef.current.length } }),
+              body: JSON.stringify({
+              speech: transcript,
+              context: {
+                shapes: shapesRef.current.map(s => {
+                  const base = { id: s.id, type: s.type, fill: s.fill || s.stroke || 'black' };
+                  if (s.type === 'circle') return { ...base, x: s.x, y: s.y, radius: s.radius };
+                  if (s.type === 'rectangle') return { ...base, x: s.x, y: s.y, width: s.width, height: s.height };
+                  if (s.type === 'text') return { ...base, x: s.x, y: s.y, text: s.text };
+                  return base;
+                }),
+              },
+            }),
             });
             if (res.ok) {
               const data = await res.json();
               const payload = data.commands && data.commands.length ? { commands: data.commands } : null;
               if (payload) {
-                processCommandPayload(setShapes, setWsMessages, payload);
+                processCommandPayload(setShapes, setWsMessages, payload, shapesRef);
                 setIsListening(false);
                 return;
               }
@@ -337,7 +399,7 @@ const IndexPage = () => {
             // Gateway or command-parser down: use mock
           }
           const mock = getMockCommand(transcript, shapesRef.current);
-          if (mock) processCommandPayload(setShapes, setWsMessages, mock);
+          if (mock) processCommandPayload(setShapes, setWsMessages, mock, shapesRef);
         }
         setIsListening(false);
       };
@@ -362,6 +424,54 @@ const IndexPage = () => {
       if (m.startsWith('[AI] ')) return { role: 'ai', text: m.replace('[AI] ', '') };
       return { role: 'ai', text: m };
     });
+  
+  // --- NEW SESSION INTEGRATION CODE ---
+  const currentSessionId = "test-room-123"; // Hardcoded for testing
+
+  const saveWhiteboard = async () => {
+    // We wrap the whole fetch in a toast.promise!
+    toast.promise(
+      fetch(`${GATEWAY_URL}/api/session/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: currentSessionId, canvasState: shapes })
+      }).then(async (res) => {
+        if (!res.ok) throw new Error('Network response was not ok');
+        return res.json();
+      }),
+      {
+        loading: 'Saving to database...',
+        success: 'Whiteboard saved successfully! 🚀',
+        error: 'Failed to save whiteboard.',
+      },
+      {
+        style: { minWidth: '250px', background: '#2c5282', color: '#fff' } // Matches your VocalCanvas theme!
+      }
+    );
+  };
+
+  const loadWhiteboard = async () => {
+    toast.promise(
+      fetch(`${GATEWAY_URL}/api/session/load/${currentSessionId}`)
+        .then(async (res) => {
+          const result = await res.json();
+          if (result.data && result.data.canvasData) {
+            setShapes(result.data.canvasData);
+            return result;
+          } else {
+            throw new Error('No data found');
+          }
+        }),
+      {
+        loading: 'Loading room...',
+        success: 'Whiteboard loaded! 🎨',
+        error: 'No saved data found for this room.',
+      },
+      {
+        style: { minWidth: '250px', background: '#2c5282', color: '#fff' }
+      }
+    );
+  };
 
   return (
     <div style={{
@@ -375,6 +485,7 @@ const IndexPage = () => {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       boxSizing: 'border-box',
     }}>
+      <Toaster position="bottom-right" reverseOrder={false} />
       {/* Top header */}
       <header style={{
         flexShrink: 0,
@@ -388,23 +499,123 @@ const IndexPage = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <MicIcon size={24} color="#fff" />
           <span style={{ fontSize: 20, fontWeight: 600 }}>VocalCanvas</span>
+          <button
+            type="button"
+            onClick={() => setShowInfo(true)}
+            aria-label="How it works"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 28,
+              height: 28,
+              padding: 0,
+              border: 'none',
+              borderRadius: '50%',
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.8)',
+              cursor: 'pointer',
+            }}
+          >
+            <InfoIcon size={20} color="currentColor" />
+          </button>
         </div>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          color: connected ? COLORS.connected : COLORS.disconnected,
-          fontSize: 14,
-        }}>
-          <span style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: connected ? COLORS.connected : COLORS.disconnected,
-          }} />
-          {connected ? 'Connected' : 'Disconnected'}
+
+        {/* NEW: Save and Load Buttons + Status */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button 
+              onClick={saveWhiteboard} 
+              style={{ background: COLORS.micButton, color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              Save Room
+            </button>
+            <button 
+              onClick={loadWhiteboard} 
+              style={{ background: COLORS.connected, color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              Load Room
+            </button>
+          </div>
+
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            color: connected ? COLORS.connected : COLORS.disconnected,
+            fontSize: 14,
+            borderLeft: `1px solid ${COLORS.chromeLight}`,
+            paddingLeft: 16
+          }}>
+            <span style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: connected ? COLORS.connected : COLORS.disconnected,
+            }} />
+            {connected ? 'Connected' : 'Disconnected'}
+          </div>
         </div>
       </header>
+
+      {/* How it works overlay */}
+      {showInfo && (
+        <div
+          role="dialog"
+          aria-label="How VocalCanvas works"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.5)',
+          }}
+          onClick={() => setShowInfo(false)}
+        >
+          <div
+            style={{
+              background: COLORS.chrome,
+              border: `1px solid ${COLORS.chromeLight}`,
+              borderRadius: 12,
+              padding: '24px 28px',
+              maxWidth: 360,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <span style={{ fontSize: 18, fontWeight: 600, color: '#fff' }}>How it works</span>
+              <button
+                type="button"
+                onClick={() => setShowInfo(false)}
+                aria-label="Close"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.7)',
+                  cursor: 'pointer',
+                  fontSize: 20,
+                  lineHeight: 1,
+                  padding: 4,
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <p style={{ fontSize: 14, color: '#e2e8f0', lineHeight: 1.6, margin: 0 }}>
+              <strong style={{ color: '#fff' }}>Open mic</strong> — Tap the microphone and speak your idea in plain words (e.g. “draw a red circle”, “write Hello”, “draw a stickman”).
+            </p>
+            <p style={{ fontSize: 14, color: '#e2e8f0', lineHeight: 1.6, margin: '12px 0 0' }}>
+              <strong style={{ color: '#fff' }}>Keep your idea in creation</strong> — The AI turns your speech into shapes and text on the canvas. You can drag shapes to move them. Say “clear” to start over.
+            </p>
+            <p style={{ fontSize: 12, color: COLORS.hint, lineHeight: 1.5, margin: '16px 0 0' }}>
+              When the status shows Connected, your commands are processed in real time. If it shows Disconnected, the app will still try to interpret your speech.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Main: canvas + command log */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0, minWidth: 0 }}>
@@ -549,7 +760,7 @@ const IndexPage = () => {
       }}>
         <button
           onClick={handleSpeech}
-          disabled={isListening}
+          disabled={isListening || isWaitingForAI}
           style={{
             width: 64,
             height: 64,
@@ -557,18 +768,18 @@ const IndexPage = () => {
             border: 'none',
             background: COLORS.micButton,
             color: '#fff',
-            cursor: isListening ? 'wait' : 'pointer',
+            cursor: isListening || isWaitingForAI ? 'wait' : 'pointer',
             boxShadow: '0 4px 20px rgba(66, 153, 225, 0.5)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
           }}
-          title={isListening ? 'Listening...' : 'Speak command'}
+          title={isListening ? 'Listening...' : isWaitingForAI ? 'AI responding...' : 'Speak command'}
         >
           <MicIcon size={28} color="#fff" />
         </button>
         <span style={{ fontSize: 14, color: '#e2e8f0' }}>
-          {isListening ? 'Listening...' : 'Speak command'}
+          {isListening ? 'Listening...' : isWaitingForAI ? 'AI responding...' : 'Speak command'}
         </span>
         <span style={{ fontSize: 12, color: COLORS.hint }}>
           Try saying &quot;draw a yellow star&quot;

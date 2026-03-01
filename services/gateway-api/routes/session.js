@@ -12,13 +12,13 @@ router.post('/save', rateLimiter, optionalAuth, async (req, res) => {
   try {
     const { sessionId, canvasState, metadata } = req.body;
     
-    if (!canvasState) {
-      return res.status(400).json({ error: 'Canvas state required' });
+    if (!canvasState || !sessionId) {
+      return res.status(400).json({ error: 'Canvas state and sessionId required' });
     }
     
-    const response = await axios.post(`${SESSION_SERVICE_URL}/api/session/save`, {
-      sessionId,
-      canvasState,
+    // CHANGED: URL is now /api/sessions/:id and body uses canvasData
+    const response = await axios.post(`${SESSION_SERVICE_URL}/api/sessions/${sessionId}`, {
+      canvasData: canvasState,
       metadata,
       user: req.user?.username || 'anonymous'
     });
@@ -38,7 +38,8 @@ router.get('/load/:sessionId', optionalAuth, async (req, res) => {
   try {
     const { sessionId } = req.params;
     
-    const response = await axios.get(`${SESSION_SERVICE_URL}/api/session/load/${sessionId}`, {
+    // CHANGED: URL is now /api/sessions/:id (removed the word 'load')
+    const response = await axios.get(`${SESSION_SERVICE_URL}/api/sessions/${sessionId}`, {
       params: { user: req.user?.username || 'anonymous' }
     });
     

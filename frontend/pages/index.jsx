@@ -112,8 +112,8 @@ function applyCommand(setShapes, command) {
 }
 
 // Normalize payload to command list and run each (used by WebSocket and mock).
-// Payload can be: single command { type, ... }, array [cmd, ...], or { commands: [cmd, ...] }.
-function processCommandPayload(setShapes, setWsMessages, payload) {
+// If shapesRef is passed, resolve placeholder ids to real ids for MOVE/DELETE/RESIZE/ROTATE.
+function processCommandPayload(setShapes, setWsMessages, payload, shapesRef) {
   if (!payload || typeof payload !== 'object') return;
   const commands = Array.isArray(payload)
     ? payload
@@ -122,15 +122,47 @@ function processCommandPayload(setShapes, setWsMessages, payload) {
       : payload.type
         ? [payload]
         : [];
+  const shapes = shapesRef?.current ?? [];
   for (const cmd of commands) {
     if (!cmd || typeof cmd !== 'object' || !cmd.type) continue;
     if (cmd.type === 'ERROR') {
       setWsMessages(msgs => [...msgs, `[AI] Error: ${cmd.reason || 'unclear'}`]);
       continue;
     }
-    const summary = applyCommand(setShapes, cmd);
+    let toApply = cmd;
+    if (cmd.id && (cmd.type === 'MOVE' || cmd.type === 'DELETE' || cmd.type === 'RESIZE' || cmd.type === 'ROTATE')) {
+      const resolved = resolveShapeId(shapes, cmd.id);
+      if (resolved) toApply = { ...cmd, id: resolved };
+    }
+    const summary = applyCommand(setShapes, toApply);
     if (summary) setWsMessages(msgs => [...msgs, `[AI] Action: ${summary}`]);
   }
+}
+
+// Resolve backend id (real id or placeholder like "last", "first", "the red circle") to real shape id.
+// Fallback when LLM returns a placeholder instead of id from context.
+function resolveShapeId(shapes, idStr) {
+  if (!shapes.length || idStr == null || idStr === '') return null;
+  const str = String(idStr).toLowerCase().trim();
+  if (shapes.some(s => s.id === idStr)) return idStr;
+  if (/\b(last|the last one)\b/.test(str)) return shapes[shapes.length - 1].id;
+  if (/\b(first|the first one)\b/.test(str)) return shapes[0].id;
+  if (/\b(second|the second one)\b/.test(str) && shapes.length > 1) return shapes[1].id;
+  if (/\b(third|the third one)\b/.test(str) && shapes.length > 2) return shapes[2].id;
+  if (/\b(the )?circle\b/.test(str)) { const s = shapes.find(sh => sh.type === 'circle'); if (s) return s.id; }
+  if (/\b(the )?(rectangle|rect|square)\b/.test(str)) { const s = shapes.find(sh => sh.type === 'rectangle'); if (s) return s.id; }
+  if (/\b(the )?text\b/.test(str)) { const s = shapes.find(sh => sh.type === 'text'); if (s) return s.id; }
+  const colorToFills = { red: ['red', '#e57373', '#c62828'], blue: ['blue', '#64b5f6', '#1976d2'], green: ['green'], yellow: ['yellow'], black: ['black'] };
+  for (const [c, fills] of Object.entries(colorToFills)) {
+    if (new RegExp(`\\b(the )?${c}( one)?\\b`).test(str)) {
+      const s = shapes.find(sh => {
+        const f = (sh.fill || '').toLowerCase();
+        return f.includes(c) || fills.some(v => f === v.toLowerCase());
+      });
+      if (s) return s.id;
+    }
+  }
+  return null;
 }
 
 // Pick which shape to target from transcript (for RESIZE/ROTATE/MOVE/DELETE mock).
@@ -277,7 +309,7 @@ const IndexPage = () => {
         setWsMessages(msgs => [...msgs, raw]);
         return;
       }
-      processCommandPayload(setShapes, setWsMessages, payload);
+      processCommandPayload(setShapes, setWsMessages, payload, shapesRef);
     };
     ws.onopen = () => {
       setConnected(true);
@@ -323,7 +355,17 @@ const IndexPage = () => {
         setWsMessages(msgs => [...msgs, `[Speech] ${transcript}`]);
         if (wsRef.current && wsRef.current.readyState === 1) {
           setIsWaitingForAI(true);
-          wsRef.current.send(transcript);
+          const shapesContext = shapesRef.current.map(s => {
+            const base = { id: s.id, type: s.type, fill: s.fill || s.stroke || 'black' };
+            if (s.type === 'circle') return { ...base, x: s.x, y: s.y, radius: s.radius };
+            if (s.type === 'rectangle') return { ...base, x: s.x, y: s.y, width: s.width, height: s.height };
+            if (s.type === 'text') return { ...base, x: s.x, y: s.y, text: s.text };
+            return base;
+          });
+          wsRef.current.send(JSON.stringify({
+            speech: transcript,
+            context: { shapes: shapesContext },
+          }));
           setTimeout(() => setIsWaitingForAI(false), 50000);
         } else {
           // Try AI (gateway → command-parser/Gemini) first; fall back to local mock if unavailable
@@ -331,13 +373,24 @@ const IndexPage = () => {
             const res = await fetch(`${GATEWAY_URL}/api/command/parse`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ speech: transcript, context: { shapes: shapesRef.current.length } }),
+              body: JSON.stringify({
+              speech: transcript,
+              context: {
+                shapes: shapesRef.current.map(s => {
+                  const base = { id: s.id, type: s.type, fill: s.fill || s.stroke || 'black' };
+                  if (s.type === 'circle') return { ...base, x: s.x, y: s.y, radius: s.radius };
+                  if (s.type === 'rectangle') return { ...base, x: s.x, y: s.y, width: s.width, height: s.height };
+                  if (s.type === 'text') return { ...base, x: s.x, y: s.y, text: s.text };
+                  return base;
+                }),
+              },
+            }),
             });
             if (res.ok) {
               const data = await res.json();
               const payload = data.commands && data.commands.length ? { commands: data.commands } : null;
               if (payload) {
-                processCommandPayload(setShapes, setWsMessages, payload);
+                processCommandPayload(setShapes, setWsMessages, payload, shapesRef);
                 setIsListening(false);
                 return;
               }
@@ -346,7 +399,7 @@ const IndexPage = () => {
             // Gateway or command-parser down: use mock
           }
           const mock = getMockCommand(transcript, shapesRef.current);
-          if (mock) processCommandPayload(setShapes, setWsMessages, mock);
+          if (mock) processCommandPayload(setShapes, setWsMessages, mock, shapesRef);
         }
         setIsListening(false);
       };

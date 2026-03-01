@@ -10,13 +10,27 @@ const wss = new WebSocketServer({ port: PORT });
 
 wss.on('connection', (ws) => {
   ws.on('message', async (data) => {
-    const transcript = typeof data === 'string' ? data : data.toString();
-    if (!transcript || typeof transcript !== 'string') return;
+    const raw = typeof data === 'string' ? data : data.toString();
+    if (!raw || typeof raw !== 'string') return;
+
+    let speech = raw.trim();
+    let context = { shapes: [] };
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.speech === 'string') {
+        speech = parsed.speech.trim();
+        if (parsed.context && Array.isArray(parsed.context.shapes)) {
+          context = { shapes: parsed.context.shapes };
+        }
+      }
+    } catch (_) {
+      /* plain text transcript, use speech and empty context */
+    }
 
     try {
       const res = await axios.post(`${GATEWAY_URL}/api/command/parse`, {
-        speech: transcript.trim(),
-        context: { shapes: 0 },
+        speech,
+        context,
       }, { timeout: PARSE_TIMEOUT_MS });
 
       const commands = Array.isArray(res.data?.commands) ? res.data.commands : [];

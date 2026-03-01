@@ -96,7 +96,7 @@ The frontend is **configured WebSocket-first**: on load it connects to `NEXT_PUB
 
 ## Checklist
 
-- [ ] Gateway session routes call session service at `POST/GET /api/sessions/:id` with body `{ canvasData }` / response `data.canvasData`.
-- [ ] Frontend has Save (e.g. button) sending current `shapes` as `canvasState` (or `canvasData`) to gateway or session service.
-- [ ] Frontend has Load (e.g. button or by session id) and sets `shapes` from loaded `canvasData`.
+- [x] Gateway session routes call session service at `POST/GET /api/sessions/:id` with body `{ canvasData }` / response `data.canvasData`.
+- [x] Frontend has Save (e.g. button) sending current `shapes` as `canvasState` to gateway.
+- [x] Frontend has Load (e.g. button or by session id) and sets `shapes` from loaded `result.data.canvasData`.
 - [x] WebSocket server in `services/canvas` (port 8080): transcript → gateway parse → `{ commands }` back.
